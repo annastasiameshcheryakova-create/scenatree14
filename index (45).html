@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebAR: Президенты и Машинное Обучение</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            overflow: hidden; background-color: #000; font-family: sans-serif;
+        }
+        #webcam-container, #image-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 0;
+        }
+        video, #test-image {
+            width: 100%; height: 100%; object-fit: contain; background: #000;
+        }
+        a-scene {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;
+        }
+        #status-overlay {
+            position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.85); color: #fff; padding: 10px 20px;
+            border-radius: 20px; z-index: 2; font-size: 13px; text-align: center;
+            border: 1px solid #333; pointer-events: none;
+        }
+        #control-panel {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(20, 20, 20, 0.9); border: 1px solid #444;
+            padding: 12px; border-radius: 12px; z-index: 3;
+            display: flex; flex-direction: column; gap: 8px; align-items: center;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        .btn {
+            background: #222; color: #fff; border: 1px solid #555;
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+        }
+        .btn:hover { background: #333; }
+        .btn.active { background: #007acc; border-color: #0098ff; }
+        .selectors { display: none; gap: 5px; }
+        select {
+            background: #333; color: #fff; border: 1px solid #555;
+            padding: 5px; border-radius: 4px; font-size: 12px; outline: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status-overlay">Загрузка AI модели...</div>
+    
+    <div id="webcam-container">
+        <video id="webcam" autoplay playsinline muted></video>
+    </div>
+
+    <div id="image-container" style="display: none;">
+        <img id="test-image" src="" alt="Тестовое изображение">
+    </div>
+
+    <div id="control-panel">
+        <div>
+            <button id="mode-webcam" class="btn active" onclick="setMode('webcam')">📹 Веб-камера</button>
+            <button id="mode-gallery" class="btn" onclick="setMode('gallery')">🖼️ Тест по файлам</button>
+        </div>
+        <div id="selectors-area" class="selectors">
+            <select id="select-president" onchange="updateTestImage()">
+                <option value="george">George Washington</option>
+                <option value="lincoln">Abraham Lincoln</option>
+                <option value="franklin">Franklin Roosevelt</option>
+            </select>
+            <select id="select-index" onchange="updateTestImage()">
+                </select>
+        </div>
+    </div>
+
+    <a-scene embedded vr-mode-ui="enabled: false">
+        <a-entity camera position="0 0 0"></a-entity>
+        <a-entity id="ar-card-container" position="0 0 -2.2" visible="false">
+            <a-plane position="0 0 0" width="1.6" height="0.8" color="#1a1a1a" material="opacity: 0.85; transparent: true" id="card-bg"></a-plane>
+            <a-text value="РАСПОЗНАН ПРЕЗИДЕНТ:" align="center" position="0 0.25 0.05" scale="0.35 0.35 0.35" color="#aaa"></a-text>
+            <a-text id="president-name" value="Unknown" align="center" position="0 -0.05 0.05" scale="0.7 0.7 0.7" color="#ffffff"></a-text>
+            <a-text id="confidence-score" value="Точность: 0%" align="center" position="0 -0.28 0.05" scale="0.32 0.32 0.32" color="#00ffcc"></a-text>
+        </a-entity>
+    </a-scene>
+
+    <script>
+        // Теперь путь указывает на корень проекта (туда же, где лежит index.html)
+        const MODEL_URL = "./"; 
+        
+        // Массивы твоих картинок
+        const georgeImages = [
+            "./George1.jpg", "./George2.jpg", "./george3.jpg", "./George4.jpg", "./George5.jpg",
+            "./george6.jpg", "./George7.jpg", "./George8.jpg", "./George9.jpg", "./George10.jpg",
+            "./George11.jpg", "./George12.jpg", "./George13.jpg", "./George14.jpg", "./George 15.jpg"
+        ];
+        const lincolnImages = Array.from({length: 15}, (_, i) => `./Linkoln${i + 1}.jpg`);
+        const franklinImages = Array.from({length: 15}, (_, i) => `./Franklin${i + 1}.jpg`);
+
+        let model, maxPredictions;
+        let isWebcamMode = true;
+        
+        const webcamElement = document.getElementById('webcam');
+        const testImageElement = document.getElementById('test-image');
+        const statusOverlay = document.getElementById('status-overlay');
+        const arContainer = document.getElementById('ar-card-container');
+        const presidentNameText = document.getElementById('president-name');
+        const confidenceText = document.getElementById('confidence-score');
+        const cardBg = document.getElementById('card-bg');
+
+        const classConfig = {
+            "George Washington": { name: "Джордж Вашингтон", color: "#2b5797" },
+            "Abraham Lincoln": { name: "Авраам Линкольн", color: "#b91d47" },
+            "Franklin Roosevelt": { name: "Франклин Рузвельт", color: "#00a300" },
+            "george": { name: "Джордж Вашингтон", color: "#2b5797" },
+            "Linkoln": { name: "Авраам Линкольн", color: "#b91d47" },
+            "Franklin": { name: "Франклин Рузвельт", color: "#00a300" }
+        };
+
+        const selectIndex = document.getElementById('select-index');
+        for(let i=1; i<=15; i++) {
+            let opt = document.createElement('option');
+            opt.value = i - 1;
+            opt.innerText = `Картинка ${i} ${i > 10 ? '(Тест)' : '(Обучение)'}`;
+            selectIndex.appendChild(opt);
+        }
+
+        async function init() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                webcamElement.srcObject = stream;
+            } catch (err) {
+                console.warn("Камера недоступна, переключаемся в режим галереи.");
+                setMode('gallery');
+            }
+
+            try {
+                // Загрузка файлов напрямую из корня
+                model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+                maxPredictions = model.getTotalClasses();
+                statusOverlay.innerText = "Нейросеть загружена. Выберите режим тестирования.";
+                window.requestAnimationFrame(loop);
+            } catch (err) {
+                statusOverlay.innerText = "Ошибка: Файлы модели не найдены в корневой папке!";
+                console.error(err);
+            }
+        }
+
+        function setMode(mode) {
+            if (mode === 'webcam') {
+                isWebcamMode = true;
+                document.getElementById('mode-webcam').classList.add('active');
+                document.getElementById('mode-gallery').classList.remove('active');
+                document.getElementById('webcam-container').style.display = 'block';
+                document.getElementById('image-container').style.display = 'none';
+                document.getElementById('selectors-area').style.display = 'none';
+            } else {
+                isWebcamMode = false;
+                document.getElementById('mode-gallery').classList.add('active');
+                document.getElementById('mode-webcam').classList.remove('active');
+                document.getElementById('webcam-container').style.display = 'none';
+                document.getElementById('image-container').style.display = 'block';
+                document.getElementById('selectors-area').style.display = 'flex';
+                updateTestImage();
+            }
+        }
+
+        function updateTestImage() {
+            const pres = document.getElementById('select-president').value;
+            const idx = parseInt(document.getElementById('select-index').value);
+            
+            if (pres === 'george') testImageElement.src = georgeImages[idx];
+            else if (pres === 'lincoln') testImageElement.src = lincolnImages[idx];
+            else if (pres === 'franklin') testImageElement.src = franklinImages[idx];
+        }
+
+        async function loop() {
+            await predict();
+            window.requestAnimationFrame(loop);
+        }
+
+        async function predict() {
+            if (!model) return;
+            const inputSource = isWebcamMode ? webcamElement : testImageElement;
+            if (!isWebcamMode && (!testImageElement.complete || testImageElement.naturalWidth === 0)) return;
+
+            const prediction = await model.predict(inputSource);
+            let topPrediction = { className: "", probability: 0 };
+
+            for (let i = 0; i < maxPredictions; i++) {
+                if (prediction[i].probability > topPrediction.probability) {
+                    topPrediction = prediction[i];
+                }
+            }
+
+            if (topPrediction.probability > 0.82 && topPrediction.className !== "Background") {
+                arContainer.setAttribute('visible', 'true');
+                const config = classConfig[topPrediction.className];
+                if (config) {
+                    presidentNameText.setAttribute('value', config.name);
+                    cardBg.setAttribute('color', config.color);
+                } else {
+                    presidentNameText.setAttribute('value', topPrediction.className.toUpperCase());
+                    cardBg.setAttribute('color', '#222');
+                }
+                const score = Math.round(topPrediction.probability * 100);
+                confidenceText.setAttribute('value', `Уверенность: ${score}%`);
+            } else {
+                arContainer.setAttribute('visible', 'false');
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
